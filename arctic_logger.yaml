@@ -1,0 +1,27 @@
+arctic_logger:
+  module: arctic_logger
+  class: ArcticLogger
+  log: arctic_logger_log
+
+  # --- Sniffer to poll ---------------------------------------------------
+  # The arctic-sniffer's HTTP API. Give either `host` (an IP/hostname; the
+  # base URL becomes http://<host>) or a full `base_url`.
+  host: 192.168.10.118
+  # base_url: http://192.168.10.118
+
+  # How often to poll and store a row (seconds).
+  poll_interval_seconds: 30
+  # Per-request HTTP timeout when talking to the sniffer.
+  http_timeout_seconds: 8
+
+  # --- Storage -----------------------------------------------------------
+  # SQLite database file. Defaults to arctic_log.db inside this app directory
+  # (gitignored). Point it at a larger/backed-up volume if you prefer.
+  # db_file: /conf/apps/arctic_logger/arctic_log.db
+
+  # --- Home Assistant sensors (optional) ---------------------------------
+  # Publish a curated subset of decoded values as sensor.<prefix>_* /
+  # binary_sensor.<prefix>_* so they can be graphed in HA. The SQLite log is
+  # written regardless. Off by default to avoid cluttering HA.
+  publish_sensors: false
+  sensor_prefix: arctic

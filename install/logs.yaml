@@ -1,0 +1,7 @@
+  arctic_logger_log:
+    name: ArcticLogger
+    filename: /conf/apps/arctic_logger/arctic_logger.log
+    log_size: 1048576       # 1 MB per file
+    log_generations: 10     # keep 10 rotated files
+    format: "{asctime}.{msecs:03.0f} {levelname:<7} {message}"
+    date_format: "%Y-%m-%d %H:%M:%S"
