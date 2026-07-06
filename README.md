@@ -29,11 +29,12 @@ and writes **one timestamped row** to the `readings` table containing:
 - a decoded **fault** string (`faults`) plus a `fault_active` flag;
 - an estimated **thermal output** (`thermal_power_w`) and **COP** (`cop`),
   derived from a constant loop flow (`loop_flow_gpm`, default 11 GPM = the
-  Arctic 040A design flow) x the condenser dT (outlet − inlet), using the
-  loop fluid's heat properties (`fluid_cp_j_kgk` / `fluid_density_kg_l`,
-  defaulting to water; set them for a glycol mix). The unit has no flow
-  meter, so this is an estimate; because raw temps + input power are stored
-  every row, COP can be recomputed for all history by changing these.
+  Arctic 040A design flow) x the condenser dT (outlet − inlet), corrected for
+  the loop fluid: set `glycol_pct` (propylene-glycol vol %, cp/density derived
+  automatically) or override `fluid_cp_j_kgk` / `fluid_density_kg_l` directly.
+  The unit has no flow meter, so this is an estimate; because raw temps + input
+  power are stored every row, COP can be recomputed for all history by changing
+  these.
 
 The decode tables (register scale/sign + the five-register fault bit map) mirror
 the shared [`arctic-macon`](https://github.com/sslivins/arctic-macon) library, so

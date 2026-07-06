@@ -74,6 +74,32 @@ _SCALAR_COLUMNS = [v[0] for v in _REGISTERS.values()]
 _STATUS_BITS = {2: "Compressor", 3: "WaterPump"}
 _REG_STATUS = 2130
 
+# Propylene-glycol solution properties near the loop operating temp (~40 C),
+# by volume %: (pct, density kg/L, cp J/(kg.K)). Linearly interpolated. These
+# are approximations (the COP estimate is dominated by the flow assumption);
+# for ethylene glycol or exact figures, set fluid_cp_j_kgk / fluid_density_kg_l
+# explicitly instead of glycol_pct.
+_PG_TABLE = [
+    (0,  0.992, 4179),
+    (10, 1.001, 4068),
+    (20, 1.010, 3956),
+    (30, 1.019, 3844),
+    (40, 1.027, 3660),
+    (50, 1.034, 3470),
+]
+
+
+def _glycol_props(pct):
+    """Return (density_kg_l, cp_j_kgk) for a propylene-glycol vol %."""
+    pct = max(0.0, min(50.0, float(pct)))
+    for i in range(1, len(_PG_TABLE)):
+        p0, d0, c0 = _PG_TABLE[i - 1]
+        p1, d1, c1 = _PG_TABLE[i]
+        if pct <= p1:
+            f = (pct - p0) / (p1 - p0) if p1 != p0 else 0.0
+            return d0 + f * (d1 - d0), c0 + f * (c1 - c0)
+    return _PG_TABLE[-1][1], _PG_TABLE[-1][2]
+
 # The five Macon fault-bitfield registers.
 _FAULT_REGS = (2007, 2125, 2126, 2127, 2128)
 
@@ -186,16 +212,28 @@ class ArcticLogger(hass.Hass):
         # measurement and just update loop_flow_gpm. Because raw temps + input
         # power are stored every row, COP is always recomputable from history.
         self.loop_flow_gpm = float(self.args.get("loop_flow_gpm", 11.0))
-        # Loop fluid heat properties. Defaults are pure water; for a glycol mix
-        # use that mix's values -- BOTH matter, since glycol's higher density
-        # partly offsets its lower specific heat. ~25% propylene glycol at
-        # operating temp ~ cp 3950 J/(kg.K), density 1.015 kg/L.
-        self.fluid_cp = float(self.args.get("fluid_cp_j_kgk", 4186.0))
-        self.fluid_density = float(self.args.get("fluid_density_kg_l", 1.0))
+        # Loop fluid heat properties. Simplest is to give glycol_pct (propylene
+        # glycol, vol %) and cp/density are derived at ~40 C operating temp;
+        # BOTH matter since glycol's higher density partly offsets its lower
+        # specific heat. Explicit fluid_cp_j_kgk / fluid_density_kg_l override
+        # the glycol_pct math (e.g. for ethylene glycol or a measured value).
+        glycol_pct = self.args.get("glycol_pct")
+        if glycol_pct is not None:
+            _dens, _cp = _glycol_props(glycol_pct)
+        else:
+            _dens, _cp = 1.0, 4186.0  # pure water
+        self.fluid_density = float(self.args.get("fluid_density_kg_l", _dens))
+        self.fluid_cp = float(self.args.get("fluid_cp_j_kgk", _cp))
         # US gal/min -> L/s -> kg/s (via fluid density).
         self.flow_kg_s = (self.loop_flow_gpm * 3.785411784 / 60.0
                           * self.fluid_density)
         self._cp = self.fluid_cp
+        self.log("COP model: %.1f GPM, glycol=%s, density=%.3f kg/L, "
+                 "cp=%.0f J/kgK -> %.1f W/K"
+                 % (self.loop_flow_gpm,
+                    ("%s%%" % glycol_pct) if glycol_pct is not None else "none",
+                    self.fluid_density, self.fluid_cp,
+                    self.flow_kg_s * self.fluid_cp))
         # Only trust COP when the compressor is actually drawing (W).
         self.cop_min_input_w = float(self.args.get("cop_min_input_w", 200.0))
 

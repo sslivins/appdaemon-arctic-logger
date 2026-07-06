@@ -22,11 +22,13 @@ arctic_logger:
   # clamp-on measurement to sharpen it. Raw temps + input power are stored
   # every row, so historical COP can always be recomputed with a new value.
   loop_flow_gpm: 11.0
-  # Loop fluid heat properties (used with loop_flow_gpm to get thermal output).
-  # Defaults are pure water (cp 4186 J/kg.K, density 1.0 kg/L). This loop runs
-  # ~25% propylene glycol, which lowers cp but slightly raises density:
-  fluid_cp_j_kgk: 3950
-  fluid_density_kg_l: 1.015
+  # Loop fluid. Simplest: give the propylene-glycol concentration (vol %) and
+  # cp/density are derived at ~40 C operating temp. This loop is ~25% PG.
+  glycol_pct: 25
+  # Advanced override (skips the glycol_pct math) -- set both explicitly, e.g.
+  # for ethylene glycol or a lab-measured value:
+  # fluid_cp_j_kgk: 3950
+  # fluid_density_kg_l: 1.015
   # Ignore COP unless the compressor is actually drawing this many watts.
   cop_min_input_w: 200
 
