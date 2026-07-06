@@ -186,9 +186,16 @@ class ArcticLogger(hass.Hass):
         # measurement and just update loop_flow_gpm. Because raw temps + input
         # power are stored every row, COP is always recomputable from history.
         self.loop_flow_gpm = float(self.args.get("loop_flow_gpm", 11.0))
-        # US gal/min -> kg/s (1 US gal = 3.785411784 L, water ~= 1 kg/L).
-        self.flow_kg_s = self.loop_flow_gpm * 3.785411784 / 60.0
-        self._cp = 4186.0  # specific heat of water, J/(kg.K)
+        # Loop fluid heat properties. Defaults are pure water; for a glycol mix
+        # use that mix's values -- BOTH matter, since glycol's higher density
+        # partly offsets its lower specific heat. ~25% propylene glycol at
+        # operating temp ~ cp 3950 J/(kg.K), density 1.015 kg/L.
+        self.fluid_cp = float(self.args.get("fluid_cp_j_kgk", 4186.0))
+        self.fluid_density = float(self.args.get("fluid_density_kg_l", 1.0))
+        # US gal/min -> L/s -> kg/s (via fluid density).
+        self.flow_kg_s = (self.loop_flow_gpm * 3.785411784 / 60.0
+                          * self.fluid_density)
+        self._cp = self.fluid_cp
         # Only trust COP when the compressor is actually drawing (W).
         self.cop_min_input_w = float(self.args.get("cop_min_input_w", 200.0))
 
