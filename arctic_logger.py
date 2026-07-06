@@ -177,6 +177,21 @@ class ArcticLogger(hass.Hass):
         self.publish_sensors = bool(self.args.get("publish_sensors", False))
         self.sensor_prefix = str(self.args.get("sensor_prefix", "arctic"))
 
+        # --- COP estimation ---------------------------------------------------
+        # The Macon bus exposes no water flow (the unit only has a flow *switch*),
+        # and the loop circulator (a fixed-speed Grundfos UPS26-99FC) isn't on
+        # this bus. So thermal output is estimated from a constant loop flow x
+        # the condenser dT (outlet - inlet). Default 11 GPM is the Arctic 040A
+        # (48k BTU) manufacturer design flow; refine with a one-time clamp-on
+        # measurement and just update loop_flow_gpm. Because raw temps + input
+        # power are stored every row, COP is always recomputable from history.
+        self.loop_flow_gpm = float(self.args.get("loop_flow_gpm", 11.0))
+        # US gal/min -> kg/s (1 US gal = 3.785411784 L, water ~= 1 kg/L).
+        self.flow_kg_s = self.loop_flow_gpm * 3.785411784 / 60.0
+        self._cp = 4186.0  # specific heat of water, J/(kg.K)
+        # Only trust COP when the compressor is actually drawing (W).
+        self.cop_min_input_w = float(self.args.get("cop_min_input_w", 200.0))
+
         # --- Runtime state ----------------------------------------------------
         self._online = None      # None = unknown, True/False after first poll
         self._rows_written = 0
@@ -225,6 +240,12 @@ class ArcticLogger(hass.Hass):
                 "CREATE INDEX IF NOT EXISTS idx_readings_epoch "
                 "ON readings(epoch)"
             )
+            # Idempotent migration: add COP columns to a pre-existing DB (they
+            # are not in the CREATE above so older databases lack them).
+            have = {r[1] for r in db.execute("PRAGMA table_info(readings)")}
+            for col in ("thermal_power_w", "cop"):
+                if col not in have:
+                    db.execute('ALTER TABLE readings ADD COLUMN "%s" REAL' % col)
             db.commit()
         finally:
             db.close()
@@ -309,6 +330,20 @@ class ArcticLogger(hass.Hass):
         for addr, (col, _unit, _scale, _signed) in _REGISTERS.items():
             raw = regs.get(addr)
             row[col] = _decode_scalar(addr, raw) if raw is not None else None
+
+        # Estimated thermal output & COP from constant loop flow x condenser dT.
+        outlet = row.get("outlet_water_temp")
+        inlet = row.get("inlet_water_temp")
+        power = row.get("realtime_power")
+        thermal = None
+        cop = None
+        if outlet is not None and inlet is not None:
+            dt = outlet - inlet
+            thermal = round(self.flow_kg_s * self._cp * dt, 1)  # W (signed)
+            if power is not None and power >= self.cop_min_input_w and dt > 0:
+                cop = round(thermal / power, 2)
+        row["thermal_power_w"] = thermal
+        row["cop"] = cop
         return row
 
     def _insert(self, row):
@@ -335,6 +370,8 @@ class ArcticLogger(hass.Hass):
             "outlet_water_temp": ("Outlet Water Temp", "\u00b0C"),
             "compressor_freq": ("Compressor Freq", "Hz"),
             "realtime_power": ("Real-time Power", "W"),
+            "thermal_power_w": ("Thermal Output", "W"),
+            "cop": ("COP", None),
         }
         try:
             for col, (friendly, unit) in pub.items():

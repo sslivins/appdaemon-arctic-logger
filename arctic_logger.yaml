@@ -14,6 +14,17 @@ arctic_logger:
   # Per-request HTTP timeout when talking to the sniffer.
   http_timeout_seconds: 8
 
+  # --- COP estimation ----------------------------------------------------
+  # The unit exposes no water flow (only a flow *switch*) and the loop
+  # circulator isn't on this bus, so thermal output and COP are estimated
+  # from a constant loop flow x condenser dT (outlet - inlet). 11 GPM is the
+  # Arctic 040A (48k BTU) manufacturer design flow; replace with a one-time
+  # clamp-on measurement to sharpen it. Raw temps + input power are stored
+  # every row, so historical COP can always be recomputed with a new value.
+  loop_flow_gpm: 11.0
+  # Ignore COP unless the compressor is actually drawing this many watts.
+  cop_min_input_w: 200
+
   # --- Storage -----------------------------------------------------------
   # SQLite database file. Defaults to arctic_log.db inside this app directory
   # (gitignored). Point it at a larger/backed-up volume if you prefer.

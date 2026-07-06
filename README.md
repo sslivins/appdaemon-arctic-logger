@@ -26,7 +26,12 @@ and writes **one timestamped row** to the `readings` table containing:
   setpoint, electrical (AC current/voltage, DC bus, real-time power), EEV, and
   compressor frequency;
 - the compressor / water-pump **status bits** (`compressor_on`, `waterpump_on`);
-- a decoded **fault** string (`faults`) plus a `fault_active` flag.
+- a decoded **fault** string (`faults`) plus a `fault_active` flag;
+- an estimated **thermal output** (`thermal_power_w`) and **COP** (`cop`),
+  derived from a constant loop flow (`loop_flow_gpm`, default 11 GPM = the
+  Arctic 040A design flow) x the condenser dT (outlet − inlet). The unit has
+  no flow meter, so this is an estimate; because raw temps + input power are
+  stored every row, COP can be recomputed for all history by changing the flow.
 
 The decode tables (register scale/sign + the five-register fault bit map) mirror
 the shared [`arctic-macon`](https://github.com/sslivins/arctic-macon) library, so
@@ -50,6 +55,8 @@ readings(
   compressor_on INTEGER, waterpump_on INTEGER,
   fault_active INTEGER, faults TEXT,
   <decoded scalar columns...>,
+  thermal_power_w REAL,      -- estimated condenser heat output (W)
+  cop REAL,                  -- estimated coefficient of performance
   raw_json TEXT              -- full {addr: byte} map
 )
 ```
