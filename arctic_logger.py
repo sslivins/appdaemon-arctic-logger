@@ -285,12 +285,15 @@ class ArcticLogger(hass.Hass):
                 "CREATE INDEX IF NOT EXISTS idx_readings_epoch "
                 "ON readings(epoch)"
             )
-            # Idempotent migration: add COP columns to a pre-existing DB (they
-            # are not in the CREATE above so older databases lack them).
+            # Idempotent migration: add derived columns to a pre-existing DB
+            # (they are not in the CREATE above so older databases lack them).
             have = {r[1] for r in db.execute("PRAGMA table_info(readings)")}
-            for col in ("thermal_power_w", "cop"):
+            for col, coltype in (("thermal_power_w", "REAL"),
+                                 ("cop", "REAL"),
+                                 ("mode", "TEXT")):
                 if col not in have:
-                    db.execute('ALTER TABLE readings ADD COLUMN "%s" REAL' % col)
+                    db.execute('ALTER TABLE readings ADD COLUMN "%s" %s'
+                               % (col, coltype))
             db.commit()
         finally:
             db.close()
@@ -376,19 +379,35 @@ class ArcticLogger(hass.Hass):
             raw = regs.get(addr)
             row[col] = _decode_scalar(addr, raw) if raw is not None else None
 
-        # Estimated thermal output & COP from constant loop flow x condenser dT.
+        # Estimated heat transfer & COP from constant loop flow x loop dT.
+        # thermal_power_w is SIGNED: +ve = heat into the loop (heating mode),
+        # -ve = heat pulled out of the loop (cooling mode, reversing valve
+        # flipped so outlet < inlet). mode is inferred from that sign while the
+        # compressor is drawing; COP uses |thermal|/power so it's valid in both
+        # directions (heating COP or cooling COP/EER -- see the mode column).
         outlet = row.get("outlet_water_temp")
         inlet = row.get("inlet_water_temp")
         power = row.get("realtime_power")
         thermal = None
         cop = None
-        if outlet is not None and inlet is not None:
-            dt = outlet - inlet
+        mode = "idle"
+        dt = (outlet - inlet) if (outlet is not None and inlet is not None) \
+            else None
+        if dt is not None:
             thermal = round(self.flow_kg_s * self._cp * dt, 1)  # W (signed)
-            if power is not None and power >= self.cop_min_input_w and dt > 0:
-                cop = round(thermal / power, 2)
+        running = power is not None and power >= self.cop_min_input_w
+        if running and dt is not None:
+            if dt > 0:
+                mode = "heating"
+            elif dt < 0:
+                mode = "cooling"
+            if dt != 0:
+                cop = round(abs(thermal) / power, 2)
+        elif running:
+            mode = None  # drawing power but temps missing -> direction unknown
         row["thermal_power_w"] = thermal
         row["cop"] = cop
+        row["mode"] = mode
         return row
 
     def _insert(self, row):
@@ -434,6 +453,11 @@ class ArcticLogger(hass.Hass):
             self.set_state(
                 "binary_sensor.%s_compressor" % self.sensor_prefix,
                 state="on" if row.get("compressor_on") else "off",
+            )
+            self.set_state(
+                "sensor.%s_mode" % self.sensor_prefix,
+                state=row.get("mode") or "unknown",
+                attributes={"friendly_name": "Arctic Mode"},
             )
             self.set_state(
                 "binary_sensor.%s_fault" % self.sensor_prefix,

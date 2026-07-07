@@ -27,14 +27,16 @@ and writes **one timestamped row** to the `readings` table containing:
   compressor frequency;
 - the compressor / water-pump **status bits** (`compressor_on`, `waterpump_on`);
 - a decoded **fault** string (`faults`) plus a `fault_active` flag;
-- an estimated **thermal output** (`thermal_power_w`) and **COP** (`cop`),
-  derived from a constant loop flow (`loop_flow_gpm`, default 11 GPM = the
-  Arctic 040A design flow) x the condenser dT (outlet − inlet), corrected for
-  the loop fluid: set `glycol_pct` (propylene-glycol vol %, cp/density derived
-  automatically) or override `fluid_cp_j_kgk` / `fluid_density_kg_l` directly.
-  The unit has no flow meter, so this is an estimate; because raw temps + input
-  power are stored every row, COP can be recomputed for all history by changing
-  these.
+- an estimated **thermal output** (`thermal_power_w`, signed: +ve heating /
+  −ve cooling), a heating/cooling/idle **`mode`** (inferred from the loop dT
+  sign while the compressor runs), and a **COP** (`cop`, valid in both
+  directions via `|thermal|/power`), derived from a constant loop flow
+  (`loop_flow_gpm`, default 11 GPM = the Arctic 040A design flow) x the loop
+  dT (outlet − inlet), corrected for the loop fluid: set `glycol_pct`
+  (propylene-glycol vol %, cp/density derived automatically) or override
+  `fluid_cp_j_kgk` / `fluid_density_kg_l` directly. The unit has no flow
+  meter, so this is an estimate; because raw temps + input power are stored
+  every row, COP can be recomputed for all history by changing these.
 
 The decode tables (register scale/sign + the five-register fault bit map) mirror
 the shared [`arctic-macon`](https://github.com/sslivins/arctic-macon) library, so
@@ -58,8 +60,9 @@ readings(
   compressor_on INTEGER, waterpump_on INTEGER,
   fault_active INTEGER, faults TEXT,
   <decoded scalar columns...>,
-  thermal_power_w REAL,      -- estimated condenser heat output (W)
+  thermal_power_w REAL,      -- estimated loop heat transfer (W; +heat / -cool)
   cop REAL,                  -- estimated coefficient of performance
+  mode TEXT,                 -- 'heating' / 'cooling' / 'idle'
   raw_json TEXT              -- full {addr: byte} map
 )
 ```
