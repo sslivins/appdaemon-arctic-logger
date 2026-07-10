@@ -14,6 +14,14 @@ arctic_logger:
   # Per-request HTTP timeout when talking to the sniffer.
   http_timeout_seconds: 8
 
+  # --- Heat-pump identity (multi-unit installs) --------------------------
+  # Each heat pump has its own sniffer and its own logger instance. Run one
+  # copy of this app per unit (arctic_logger_hp1, arctic_logger_hp2, ...),
+  # each with its own host, db_file, hp_id, and hp_name. hp_id namespaces the
+  # MQTT topics/entities (arctic_<hp_id>_*); hp_name is the HA device name.
+  hp_id: hp1
+  hp_name: Arctic HP1 (Sniffer)
+
   # --- COP estimation ----------------------------------------------------
   # The unit exposes no water flow (only a flow *switch*) and the loop
   # circulator isn't on this bus, so thermal output and COP are estimated
@@ -41,5 +49,25 @@ arctic_logger:
   # Publish a curated subset of decoded values as sensor.<prefix>_* /
   # binary_sensor.<prefix>_* so they can be graphed in HA. The SQLite log is
   # written regardless. Off by default to avoid cluttering HA.
+  #
+  # NOTE: this legacy path uses AppDaemon set_state, which creates ephemeral
+  # entities with NO long-term statistics. Prefer MQTT discovery below.
   publish_sensors: false
   sensor_prefix: arctic
+
+  # --- Home Assistant via MQTT discovery (recommended) -------------------
+  # Publishes proper HA entities (device_class/state_class/units) under a
+  # per-HP device via MQTT auto-discovery. These get long-term statistics
+  # (the power sensor's hourly mean feeds a 48h/1h energy view) and survive
+  # restarts. Requires paho-mqtt in the AppDaemon container and an MQTT broker
+  # (e.g. the HA Mosquitto add-on). Entities appear as sensor.arctic_<hp_id>_*.
+  mqtt_enabled: true
+  mqtt_host: 192.168.10.212
+  mqtt_port: 1883
+  mqtt_username: arctic_sniffer
+  # Store the password in AppDaemon's secrets file (/conf/secrets.yaml) as
+  # `arctic_mqtt_password: <pw>` and reference it here — never commit it.
+  mqtt_password: !secret arctic_mqtt_password
+  # HA discovery topic prefix (matches the HA MQTT integration setting).
+  mqtt_discovery_prefix: homeassistant
+

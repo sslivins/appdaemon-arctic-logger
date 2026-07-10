@@ -38,6 +38,49 @@ import appdaemon.plugins.hass.hassapi as hass
 
 import requests
 
+try:
+    import paho.mqtt.client as mqtt
+except ImportError:  # MQTT publishing is optional; app still logs to SQLite.
+    mqtt = None
+
+
+# ---------------------------------------------------------------------------
+# MQTT-published entities (Home Assistant discovery).
+#
+# Each tuple: (object_id, friendly, device_class, state_class, unit, source_col)
+# where source_col is the row/build_row key the value is read from. Sensors get
+# discovery topics under homeassistant/sensor/<node>/<object_id>/config and all
+# read from a single retained JSON state topic. Keep this list HP-agnostic —
+# the per-HP node/unique_id prefix is applied at publish time so adding hp2 is
+# just another app instance, never a code change.
+# ---------------------------------------------------------------------------
+
+# device_class of None => plain numeric/text sensor.
+_MQTT_SENSORS = [
+    # object_id             friendly              device_class   state_class     unit    source_col
+    ("power",              "Power",              "power",       "measurement",  "W",    "realtime_power"),
+    ("thermal_power",      "Thermal Output",     "power",       "measurement",  "W",    "thermal_power_w"),
+    ("cop",                "COP",                 None,         "measurement",  None,   "cop"),
+    ("compressor_freq",    "Compressor Freq",    "frequency",   "measurement",  "Hz",   "compressor_freq"),
+    ("water_tank_temp",    "Water Tank Temp",    "temperature", "measurement",  "\u00b0C", "water_tank_temp"),
+    ("outlet_water_temp",  "Outlet Water Temp",  "temperature", "measurement",  "\u00b0C", "outlet_water_temp"),
+    ("inlet_water_temp",   "Inlet Water Temp",   "temperature", "measurement",  "\u00b0C", "inlet_water_temp"),
+    ("outdoor_ambient_temp", "Outdoor Air Temp", "temperature", "measurement",  "\u00b0C", "outdoor_ambient_temp"),
+    ("discharge_temp",     "Discharge Temp",     "temperature", "measurement",  "\u00b0C", "discharge_temp"),
+    ("suction_temp",       "Suction Temp",       "temperature", "measurement",  "\u00b0C", "suction_temp"),
+    ("hot_water_setpoint", "Hot Water Setpoint", "temperature", "measurement",  "\u00b0C", "hot_water_setpoint"),
+    ("mode",               "Mode",                None,          None,          None,   "mode"),
+]
+
+# Binary sensors: (object_id, friendly, device_class, source_col)
+# NOTE: no "fault/problem" sensor here — the existing Arctic integration
+# already provides binary_sensor.arctic_heat_pump_<n>_problem. We only add the
+# run-state bits the sniffer decodes that aren't otherwise exposed.
+_MQTT_BINARY = [
+    ("compressor", "Compressor", "running", "compressor_on"),
+    ("waterpump",  "Water Pump", "running", "waterpump_on"),
+]
+
 
 # ---------------------------------------------------------------------------
 # Macon decode tables - mirror of the shared arctic-macon library
@@ -203,6 +246,25 @@ class ArcticLogger(hass.Hass):
         self.publish_sensors = bool(self.args.get("publish_sensors", False))
         self.sensor_prefix = str(self.args.get("sensor_prefix", "arctic"))
 
+        # --- Per-heat-pump identity (multi-HP support) ------------------------
+        # Every heat pump has its own sniffer + its own logger instance. hp_id
+        # namespaces the MQTT node/unique_ids/topics; hp_name is the HA device
+        # name. Defaults keep a single-unit install working with no new config.
+        self.hp_id = str(self.args.get("hp_id", "hp1"))
+        self.hp_name = str(self.args.get("hp_name", "Arctic HP1 (Sniffer)"))
+
+        # --- MQTT publishing (HA discovery) -----------------------------------
+        self.mqtt_enabled = bool(self.args.get("mqtt_enabled", False))
+        self.mqtt_host = str(self.args.get("mqtt_host", ""))
+        self.mqtt_port = int(self.args.get("mqtt_port", 1883))
+        self.mqtt_user = self.args.get("mqtt_username")
+        self.mqtt_pass = self.args.get("mqtt_password")
+        self.mqtt_prefix = str(self.args.get("mqtt_discovery_prefix", "homeassistant"))
+        self.mqtt_base = "arctic/%s" % self.hp_id            # state/availability root
+        self.mqtt_avail = self.mqtt_base + "/availability"
+        self._mqtt = None
+        self._mqtt_discovery_sent = False
+
         # --- COP estimation ---------------------------------------------------
         # The Macon bus exposes no water flow (the unit only has a flow *switch*),
         # and the loop circulator (a fixed-speed Grundfos UPS26-99FC) isn't on
@@ -242,6 +304,9 @@ class ArcticLogger(hass.Hass):
         self._rows_written = 0
 
         self._init_db()
+
+        if self.mqtt_enabled:
+            self._mqtt_init()
 
         # Manual "poll now" trigger for testing.
         self.listen_event(self._manual_poll, "arctic_logger_poll")
@@ -310,11 +375,13 @@ class ArcticLogger(hass.Hass):
                 self.log("Sniffer unreachable at %s - skipping polls until it "
                          "responds (expected briefly during its OTA reboots)."
                          % self.base_url, level="WARNING")
+                self._mqtt_availability(False)
             self._online = False
             return
         if self._online is not True:
             self.log("Sniffer reachable at %s - logging resumed."
                      % self.base_url)
+            self._mqtt_availability(True)
         self._online = True
 
         now = datetime.now(timezone.utc)
@@ -328,6 +395,8 @@ class ArcticLogger(hass.Hass):
 
         if self.publish_sensors:
             self._publish(row)
+        if self.mqtt_enabled:
+            self._mqtt_publish_state(row)
 
     def _fetch(self):
         """Return (regs_dict[int->int], status_dict) or (None, None) on error."""
@@ -422,6 +491,139 @@ class ArcticLogger(hass.Hass):
             db.commit()
         finally:
             db.close()
+
+    # --------------------------------------------------------------- MQTT ---
+    def _mqtt_init(self):
+        """Connect to the broker and publish HA discovery configs (once)."""
+        if mqtt is None:
+            self.log("mqtt_enabled but paho-mqtt is not installed - skipping.",
+                     level="ERROR")
+            self.mqtt_enabled = False
+            return
+        if not self.mqtt_host:
+            self.log("mqtt_enabled but no mqtt_host configured - skipping.",
+                     level="ERROR")
+            self.mqtt_enabled = False
+            return
+        try:
+            client = mqtt.Client(client_id="arctic-logger-%s" % self.hp_id)
+            if self.mqtt_user:
+                client.username_pw_set(self.mqtt_user, self.mqtt_pass)
+            # Last will: mark the device offline if the logger dies unexpectedly.
+            client.will_set(self.mqtt_avail, "offline", qos=1, retain=True)
+            client.on_connect = self._mqtt_on_connect
+            # Assign before connect()/loop_start(): on_connect can fire on the
+            # network thread before the next line runs, and
+            # _mqtt_publish_discovery() guards on self._mqtt (would silently skip
+            # discovery, leaving state/availability published but no entities).
+            self._mqtt = client
+            client.connect(self.mqtt_host, self.mqtt_port, keepalive=60)
+            client.loop_start()
+            self.log("MQTT: connecting to %s:%d as device '%s' (%s)"
+                     % (self.mqtt_host, self.mqtt_port, self.hp_id, self.hp_name))
+        except Exception as exc:  # noqa: BLE001
+            self.log("MQTT connect failed: %s" % exc, level="ERROR")
+            self.mqtt_enabled = False
+
+    def _mqtt_on_connect(self, client, userdata, flags, rc):
+        if rc != 0:
+            self.log("MQTT connect rc=%s (non-zero = failure)" % rc,
+                     level="ERROR")
+            return
+        # (Re)publish discovery + availability on every (re)connect so entities
+        # survive an HA/broker restart.
+        self._mqtt_publish_discovery()
+        client.publish(self.mqtt_avail, "online", qos=1, retain=True)
+        self.log("MQTT connected; discovery published for %d sensors."
+                 % (len(_MQTT_SENSORS) + len(_MQTT_BINARY)))
+
+    def _mqtt_device(self):
+        return {
+            "identifiers": ["arctic_%s" % self.hp_id],
+            "name": self.hp_name,
+            "manufacturer": "Arctic",
+            "model": "ECO-600 (Macon)",
+        }
+
+    def _mqtt_publish_discovery(self):
+        if not self._mqtt:
+            return
+        dev = self._mqtt_device()
+        state_topic = self.mqtt_base + "/state"
+        for oid, friendly, dclass, sclass, unit, col in _MQTT_SENSORS:
+            uid = "arctic_%s_%s" % (self.hp_id, oid)
+            cfg = {
+                "name": friendly,
+                "unique_id": uid,
+                "state_topic": state_topic,
+                "value_template": "{{ value_json.%s }}" % col,
+                "availability_topic": self.mqtt_avail,
+                "device": dev,
+            }
+            if dclass:
+                cfg["device_class"] = dclass
+            if sclass:
+                cfg["state_class"] = sclass
+            if unit:
+                cfg["unit_of_measurement"] = unit
+            topic = "%s/sensor/arctic_%s/%s/config" % (self.mqtt_prefix,
+                                                       self.hp_id, oid)
+            self._mqtt.publish(topic, json.dumps(cfg), qos=1, retain=True)
+        for oid, friendly, dclass, col in _MQTT_BINARY:
+            uid = "arctic_%s_%s" % (self.hp_id, oid)
+            cfg = {
+                "name": friendly,
+                "unique_id": uid,
+                "state_topic": state_topic,
+                "value_template": "{{ 'ON' if value_json.%s else 'OFF' }}" % col,
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "availability_topic": self.mqtt_avail,
+                "device": dev,
+            }
+            if dclass:
+                cfg["device_class"] = dclass
+            topic = "%s/binary_sensor/arctic_%s/%s/config" % (self.mqtt_prefix,
+                                                              self.hp_id, oid)
+            self._mqtt.publish(topic, json.dumps(cfg), qos=1, retain=True)
+        self._mqtt_discovery_sent = True
+
+    def _mqtt_publish_state(self, row):
+        if not self._mqtt:
+            return
+        # Publish every field the sensors reference in one retained JSON blob.
+        # None -> omit so the value_template yields "None"->unavailable cleanly.
+        payload = {}
+        for _oid, _f, _dc, _sc, _u, col in _MQTT_SENSORS:
+            val = row.get(col)
+            payload[col] = val
+        for _oid, _f, _dc, col in _MQTT_BINARY:
+            payload[col] = 1 if row.get(col) else 0
+        try:
+            self._mqtt.publish(self.mqtt_base + "/state",
+                               json.dumps(payload), qos=0, retain=True)
+        except Exception as exc:  # noqa: BLE001 - never let publishing kill poll
+            self.log("MQTT state publish failed: %s" % exc, level="WARNING")
+
+    def _mqtt_availability(self, online):
+        if not self._mqtt:
+            return
+        try:
+            self._mqtt.publish(self.mqtt_avail,
+                               "online" if online else "offline",
+                               qos=1, retain=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def terminate(self):
+        # Clean shutdown: mark offline and disconnect so HA shows unavailable.
+        if self._mqtt:
+            try:
+                self._mqtt.publish(self.mqtt_avail, "offline", qos=1, retain=True)
+                self._mqtt.loop_stop()
+                self._mqtt.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
 
     # ------------------------------------------------------------ sensors ---
     def _publish(self, row):
