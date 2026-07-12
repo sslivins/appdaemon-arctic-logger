@@ -71,3 +71,38 @@ arctic_logger:
   # HA discovery topic prefix (matches the HA MQTT integration setting).
   mqtt_discovery_prefix: homeassistant
 
+
+# ===========================================================================
+# Second heat pump (HP2) — its own sniffer + its own logger instance.
+# Same module/class, distinct host, db_file, hp_id, and hp_name so the two
+# never collide. hp_id namespaces MQTT topics/unique_ids (arctic_hp2_*).
+# ===========================================================================
+arctic_logger_hp2:
+  module: arctic_logger
+  class: ArcticLogger
+  log: arctic_logger_log
+
+  host: 192.168.10.121
+  poll_interval_seconds: 30
+  http_timeout_seconds: 8
+
+  hp_id: hp2
+  hp_name: Arctic HP2 (Sniffer)
+
+  # COP model (same loop assumptions as HP1 until measured per-unit).
+  loop_flow_gpm: 11.0
+  glycol_pct: 25
+  cop_min_input_w: 200
+
+  # Separate database so the two units don't interleave rows.
+  db_file: /conf/apps/arctic_logger/arctic_log_hp2.db
+
+  publish_sensors: false
+  sensor_prefix: arctic
+
+  mqtt_enabled: true
+  mqtt_host: 192.168.10.212
+  mqtt_port: 1883
+  mqtt_username: arctic_sniffer
+  mqtt_password: !secret arctic_mqtt_password
+  mqtt_discovery_prefix: homeassistant
